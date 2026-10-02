@@ -1,0 +1,29 @@
+{
+  "summary": "在「设置 → 可观测性」里新增一行开关「追踪代理对话」（默认关闭，中英文均已翻译），用于把本地 Agent 会话导出成 Langfuse 链路；其余改动都在后端导出与采集逻辑，magpie 自身界面没有其他可见变化。",
+  "scenes": [
+    {
+      "title": "设置里新增的会话追踪开关",
+      "shots": [
+        {
+          "file": "01-otel-sessions-default.png",
+          "caption": "可观测性设置页，新增的「追踪代理对话」一行",
+          "width": 2560
+        },
+        {
+          "file": "02-otel-sessions-on.png",
+          "caption": "点击「开启」后的这一行",
+          "width": 2560
+        }
+      ]
+    }
+  ],
+  "video": "preview.mp4",
+  "poster": "poster.png",
+  "errors": [],
+  "leak": false,
+  "skipped": null,
+  "mismatch": "",
+  "unseen": "这项开关真正的效果看不到：把 Codex、Pi、Oh My Pi、Claude Code/Cowork、OpenCode、Gemini CLI 的本地会话（以及网关请求根 span 与路由尝试子 span）导出成带层级的 Langfuse 链路，需要配置 OTLP/Langfuse 接收端并存在这些 Agent 的真实本地会话文件；沙盒里只有 DeepSeek 供应商、没有 OTLP 目的地，Agent 也都是全新安装、没有会话记录，因此只能看到开关本身及其保存状态，看不到任何链路瀑布。",
+  "interactive": true,
+  "pages": 2
+}
