@@ -1,8 +1,7 @@
 # Local fork
 
-This fork starts from upstream `v0.1.661` (commit
-`f1e265ea3d9025bbb38e8e5c8e6b285d6d51a8fc`). Its changes live on
-`clive/pi-messages`.
+This fork tracks upstream releases on `clive/pi-messages`. The current upstream
+base is `v0.1.675`.
 
 ## Pi protocol selection
 
@@ -31,7 +30,7 @@ codesign --force --deep --sign - magpie.app
 ```
 
 Keep the default version produced by `git describe`, for example
-`v0.1.661-1-g<commit>`. Magpie's updater recognizes this as a source build and
+`v0.1.675-3-g<commit>`. Magpie's updater recognizes this as a source build and
 does not replace it with an official release. Do not override `VERSION` with a
 plain release version when installing this fork locally.
 
