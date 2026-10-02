@@ -85,10 +85,16 @@ func magpieModels(agent string) []catalog.Model {
 	labels := provider.Labels(shown)
 	for i, e := range shown {
 		m := catalog.Model{ID: e.ID, Name: labels[i], Provider: firstOf(e.Provider.Catalogs()), Efforts: e.Efforts, Images: e.Images, ImageInput: e.ImageInput, Context: e.Context, Output: e.Output}
-		// APIs is the one to ask it on for the gateway to relay the request
-		// as it is; none for a group, whose members may each want another
+		// APIs is the client's preferred request protocol; normally the
+		// provider's native API. A group may need several different APIs.
 		if e.Group == "" {
-			if n := e.Provider.Native(e.Model); n != "" {
+			if (agent == "pi" || agent == "omo") && e.Provider.Account != nil && e.Provider.Account.Agent == "claude" {
+				// Claude Code still bridges through the CLI, but Messages
+				// retains thinking signatures and tool-result error flags
+				// that Chat cannot represent. Native() stays empty because
+				// this subscription cannot pass HTTP requests through.
+				m.APIs = []string{string(provider.Anthropic)}
+			} else if n := e.Provider.Native(e.Model); n != "" {
 				m.APIs = []string{string(n)}
 			}
 		}

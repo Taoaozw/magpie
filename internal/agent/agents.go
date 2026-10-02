@@ -280,23 +280,20 @@ func magpieProviderJSONAt(shape, catalog, gw string) any {
 }
 
 // piModelJSON is one of magpie's models as an entry of Pi's models.json.
-// native asks it on the API its provider speaks natively (a model's own
-// api and baseUrl); without it the model is left on the provider's
+// preferred asks it on the client's preferred API (a model's own api and
+// baseUrl); without it the model is left on the provider's
 // openai-completions (Pencil, pencil.go).
-func piModelJSON(m catalog.Model, gw string, native bool) map[string]any {
+func piModelJSON(m catalog.Model, gw string, preferred bool) map[string]any {
 	// reasoning lets Pi offer its thinking levels for the model
 	e := map[string]any{"id": m.ID, "name": m.Name, "reasoning": len(m.Efforts) > 0}
-	// each model is asked on the API its provider speaks natively,
-	// so the gateway relays what Pi sent as it is instead of
-	// translating Chat. One served on OpenAI's Responses API alone,
-	// or best there (a ChatGPT sign-in, GPT on OpenAI's API or
-	// Copilot's), goes to baseUrl/responses; one on Anthropic's
-	// Messages API alone to the gateway's /v1/messages (Anthropic's
-	// SDK adds the /v1). A Claude that thinks only adaptively is
-	// told so: Pi would otherwise ask it for a thinking budget,
-	// which it turns away.
+	// Prefer the provider's native API to avoid translating Chat. Claude
+	// Code subscriptions also prefer Messages to retain more protocol
+	// information, although their CLI bridge still translates requests.
+	// Responses goes to baseUrl/responses; Anthropic's SDK appends
+	// /v1/messages to the gateway root. A Claude that thinks only
+	// adaptively is told so, rather than given a thinking budget it rejects.
 	switch {
-	case !native:
+	case !preferred:
 	case slices.Contains(m.APIs, string(provider.Responses)):
 		e["api"] = "openai-responses"
 	case slices.Contains(m.APIs, string(provider.Anthropic)):
