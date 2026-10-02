@@ -191,6 +191,21 @@ var presets = []PresetDef{
 		Website: "https://cloud.tencent.com/document/product/1823/130060", KeysURL: "https://console.cloud.tencent.com/tokenhub/tokenplan",
 		Models: []string{"tc-code-latest", "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k3", "kimi-k2.7-code",
 			"deepseek-v4-pro-202606", "deepseek-v4-flash-202605", "minimax-m3", "minimax-m2.7", "hy4-preview", "hy3"}},
+	// TokenHub pay as you go: an API key of TokenHub's own (not the plan's
+	// sk-tp-), at tokenhub.tencentmaas.com in Guangzhou and
+	// tokenhub-intl.tencentmaas.com in Singapore. Each serves chat
+	// completions and Responses under /v1 (Responses converted from chat
+	// on its side for the models that speak chat alone) and Anthropic
+	// messages at /v1/messages, with its list at /v1/models. It serves Hy
+	// and other makers' models (DeepSeek, GLM, Kimi, MiniMax, Qwen …).
+	{ID: "tencent-tokenhub", Name: "Tencent Cloud TokenHub", Icon: "tencentcloud-color", Kind: KindVendor, Catalog: "tencent-tokenhub", Hosts: true,
+		Chat: "https://tokenhub-intl.tencentmaas.com/v1", Responses: "https://tokenhub-intl.tencentmaas.com/v1", Anthropic: "https://tokenhub-intl.tencentmaas.com",
+		Note:    "Pay as you go",
+		Website: "https://www.tencentcloud.com/document/product/1300/78939", KeysURL: "https://console.tencentcloud.com/tokenhub/apikey"},
+	{ID: "tencent-tokenhub-cn", Name: "Tencent Cloud TokenHub (China)", Icon: "tencentcloud-color", Kind: KindVendor, Catalog: "tencent-tokenhub", Hosts: true,
+		Chat: "https://tokenhub.tencentmaas.com/v1", Responses: "https://tokenhub.tencentmaas.com/v1", Anthropic: "https://tokenhub.tencentmaas.com",
+		Note:    "Pay as you go",
+		Website: "https://cloud.tencent.com/document/product/1823/130078", KeysURL: "https://console.cloud.tencent.com/tokenhub/apikey"},
 	// Huawei Cloud MaaS's Token Plan: personal accounts in 西南-贵阳一, its
 	// quota spent only at the plan's own endpoints under /plan (v2 for chat
 	// completions, anthropic for messages; its Claude Code, OpenClaw, Cherry
@@ -297,8 +312,9 @@ var presets = []PresetDef{
 		Models: []string{"cline-pass/glm-5.3", "cline-pass/glm-5.3-flash", "cline-pass/kimi-k3", "cline-pass/deepseek-v4-pro",
 			"cline-pass/deepseek-v4.1-flash", "cline-pass/mimo-v2.5", "cline-pass/mimo-v2.5-pro", "cline-pass/minimax-m3",
 			"cline-pass/muse-spark-1.3-contributor", "cline-pass/qwen3.8-max", "cline-pass/qwen3.7-max", "cline-pass/qwen3.7-plus"}},
-	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay, Catalog: "opencode",
-		Chat: "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
+	{ID: "opencode-zen", Name: "OpenCode Zen", Icon: "opencode", Kind: KindRelay, Catalog: "opencode", NoKey: true,
+		KeyHint: "optional: free models need no key",
+		Chat:    "https://opencode.ai/zen/v1", Responses: "https://opencode.ai/zen/v1", Anthropic: "https://opencode.ai/zen",
 		// its free models (-free) are served to OpenCode alone, which
 		// magpie asks them as (OpenCodeFree)
 		Website: "https://opencode.ai/docs/zen", KeysURL: "https://opencode.ai/auth"},

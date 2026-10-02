@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -50,6 +51,11 @@ type QuotaWindow struct {
 	Aside bool          `json:"-"`
 	// matches further scopes pools whose membership isn't one model word.
 	matches func(string) bool
+	// partial is set on the windows of a reading that may leave some out:
+	// a Claude account only heard of as Claude Code answered (its
+	// rate_limit_event names one window at a time), never read whole by
+	// /usage — five hours alone there needn't mean no week.
+	partial bool
 }
 
 // SubscriptionQuota is provider-reported allowance usage. This is separate
@@ -81,6 +87,9 @@ type SubscriptionQuota struct {
 	// Resets are the rate-limit resets a Codex account holds, nil when it
 	// holds none (codex_resets.go).
 	Resets *ResetCredits `json:"resets,omitempty"`
+	// Daily is a WorkBuddy account's credits used day by day, as magpie
+	// counted them from its readings (credits_daily.go).
+	Daily *DailyCredits `json:"daily,omitempty"`
 }
 
 var subscriptionUsageCache struct {
@@ -118,6 +127,7 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		go func() {
 			start := time.Now()
 			out := fetchSubscriptionUsage()
+			noteDailyCredits(out, time.Now())
 			c.Lock()
 			c.at, c.data, c.pending = time.Now(), out, nil
 			if claudeAsked.Load() > start.UnixNano() {
@@ -140,8 +150,9 @@ func SubscriptionUsage(ctx context.Context) []SubscriptionQuota {
 		}
 	}
 	c.Lock()
-	defer c.Unlock()
-	return visibleQuotas(c.data)
+	out := visibleQuotas(c.data)
+	c.Unlock()
+	return withDailyCredits(out, time.Now())
 }
 
 // visibleQuotas drops accounts removed from magpie since the last refresh.
@@ -432,6 +443,16 @@ type claudeUsageEntry struct {
 	tried time.Time     // when /usage was last run, answered or not
 	wait  time.Duration // how long after tried it runs again unasked
 	err   error         // what the last run said, when it failed
+	whole bool          // /usage was read: ws has every window the account has
+}
+
+// windows is what e keeps as of now, partial where /usage never read it.
+func (e claudeUsageEntry) windows(now time.Time) []QuotaWindow {
+	ws := elapsed(e.ws, now)
+	for i := range ws {
+		ws[i].partial = !e.whole
+	}
+	return ws
 }
 
 // claudeAskFloor is the least time between two readings, however often the
@@ -538,7 +559,7 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 		case ok && e.err != nil && !(heard && !claudeUsageDenied.MatchString(e.err.Error())):
 			return []QuotaWindow{}, e.err
 		case ok && e.ws != nil:
-			return elapsed(e.ws, now), nil
+			return e.windows(now), nil
 		case active:
 			return []QuotaWindow{}, errClaudeNotAsked
 		default:
@@ -551,7 +572,7 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	// spent as the one it was moved to (nil_1024)
 	kept := func() ([]QuotaWindow, error) {
 		if e.ws != nil {
-			return elapsed(e.ws, now), nil
+			return e.windows(now), nil
 		}
 		return []QuotaWindow{}, errClaudeNotAsked
 	}
@@ -578,7 +599,7 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 		}
 		c.Unlock()
 		if e.ws != nil && time.Since(e.heard) < claudeHeard && !claudeUsageDenied.MatchString(err.Error()) {
-			return elapsed(e.ws, time.Now()), nil // a fresh header stands unless the account was refused
+			return e.windows(time.Now()), nil // a fresh header stands unless the account was refused
 		}
 		return ws, err
 	}
@@ -586,7 +607,7 @@ func claudeWindows(ctx context.Context, user string, active bool) ([]QuotaWindow
 	if c.m == nil {
 		c.m = map[string]claudeUsageEntry{}
 	}
-	c.m[key] = claudeUsageEntry{at: now, ws: ws, heard: e.heard, tried: now, wait: e.wait}
+	c.m[key] = claudeUsageEntry{at: now, ws: ws, heard: e.heard, tried: now, wait: e.wait, whole: true}
 	c.Unlock()
 	return ws, nil
 }
@@ -636,7 +657,7 @@ func codexSubscriptionUsage(ctx context.Context, path string) SubscriptionQuota 
 		q.Error = err.Error()
 		return q
 	}
-	q.Plan, q.Windows, q.Resets, err = codexWindows(ctx, token, accountID)
+	q.Plan, q.Windows, q.Resets, q.Balance, err = codexWindows(ctx, token, accountID)
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		q.Until = codexUntil(b, time.Now())
 	}
@@ -662,11 +683,20 @@ func codexUntil(auth []byte, now time.Time) *time.Time {
 	return &t
 }
 
-// codexWindows is the plan, allowance and rate-limit resets of the
-// ChatGPT account token signs in to.
-func codexWindows(ctx context.Context, token, accountID string) (plan string, out []QuotaWindow, resets *ResetCredits, err error) {
+// codexWindows is the plan, allowance, rate-limit resets and credits of
+// the ChatGPT account token signs in to. credits is what is left of the
+// credits the account bought or was given (#571), which Codex spends once
+// a window is used up, "" when it holds none or they are unlimited.
+func codexWindows(ctx context.Context, token, accountID string) (plan string, out []QuotaWindow, resets *ResetCredits, credits string, err error) {
 	var data struct {
-		PlanType  string `json:"plan_type"`
+		PlanType string `json:"plan_type"`
+		// as Codex's /status reads it: {"has_credits":true,
+		// "unlimited":false,"balance":"1234.5"}
+		Credits *struct {
+			Has       bool   `json:"has_credits"`
+			Unlimited bool   `json:"unlimited"`
+			Balance   string `json:"balance"`
+		} `json:"credits"`
 		RateLimit struct {
 			Primary   *codexWindow `json:"primary_window"`
 			Secondary *codexWindow `json:"secondary_window"`
@@ -678,7 +708,12 @@ func codexWindows(ctx context.Context, token, accountID string) (plan string, ou
 	base := strings.TrimSuffix(CodexBase, "/codex")
 	out = []QuotaWindow{}
 	if err = accountJSON(ctx, base+"/wham/usage", token, map[string]string{"chatgpt-account-id": accountID}, &data); err != nil {
-		return "", out, nil, err
+		return "", out, nil, "", err
+	}
+	if c := data.Credits; c != nil && c.Has && !c.Unlimited {
+		if n, perr := strconv.ParseFloat(strings.TrimSpace(c.Balance), 64); perr == nil && n > 0 {
+			credits = fmt.Sprintf("%s credits", compactNumber(math.Round(n*100)/100))
+		}
 	}
 	if data.Resets != nil {
 		resets = codexResets(ctx, base, token, accountID, data.Resets.Available)
@@ -689,7 +724,7 @@ func codexWindows(ctx context.Context, token, accountID string) (plan string, ou
 	if data.RateLimit.Secondary != nil {
 		out = append(out, data.RateLimit.Secondary.window())
 	}
-	return data.PlanType, out, resets, nil
+	return data.PlanType, out, resets, credits, nil
 }
 
 type codexWindow struct {

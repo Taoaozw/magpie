@@ -6,6 +6,7 @@ package gui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -223,6 +224,17 @@ type settingsJSON struct {
 	SearchAPIs     []searchAPIJSON    `json:"searchAPIs"`
 	SearchVendors  []searchVendorJSON `json:"searchVendors"`
 	SearchProvider string             `json:"searchProvider,omitempty"`
+	// the providers Settings' Searcher may name, the one magpie picks when
+	// it names none, why the one it names isn't used (gateway.Searcher*),
+	// and the relays said to search that are never asked to (#359)
+	SearchChoices []searchChoiceJSON `json:"searchChoices"`
+	SearchAuto    string             `json:"searchAuto,omitempty"`
+	SearchUnused  string             `json:"searchUnused,omitempty"`
+	SearchRelays  []string           `json:"searchRelays,omitempty"`
+	// the GitHub token the library asks GitHub with, masked, and where it
+	// is from ("settings", GITHUB_TOKEN or GH_TOKEN); never the token
+	GitHubTokenMask string `json:"githubTokenMask,omitempty"`
+	GitHubTokenFrom string `json:"githubTokenFrom,omitempty"`
 	// where other machines reach the gateway while it is shared
 	LANURLs []string `json:"lanURLs,omitempty"`
 	// LANURLs are a container's own addresses, not the host's: the page
@@ -252,6 +264,16 @@ type searchAPIJSON struct {
 	Ready  bool   `json:"ready"`
 }
 
+// searchChoiceJSON is a provider that can search for a model that can't,
+// with the model it searches with when none is named, and its models.
+type searchChoiceJSON struct {
+	ID     string     `json:"id"`
+	Name   string     `json:"name"`
+	Icon   string     `json:"icon,omitempty"`
+	Small  string     `json:"small"`
+	Models []modelRef `json:"models"`
+}
+
 type searchVendorJSON struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -272,11 +294,30 @@ func searchState(s *settingsJSON) {
 		s.SearchVendors = append(s.SearchVendors, searchVendorJSON{ID: v.ID, Name: v.Name, KeysURL: v.KeysURL, NeedURL: v.Base == ""})
 	}
 	s.SearchProvider = gateway.Searcher()
+	s.SearchAuto, s.SearchUnused = gateway.AutoSearcher(), gateway.SearcherUnused()
+	s.SearchChoices = []searchChoiceJSON{}
+	for _, c := range gateway.Searchers() {
+		p := c.Provider
+		j := searchChoiceJSON{ID: p.ID, Name: p.Name, Icon: p.Icon, Small: c.Small, Models: []modelRef{}}
+		for _, m := range c.Models {
+			j.Models = append(j.Models, modelRef{ID: p.ID + "/" + m.ID, Name: cmp.Or(m.Name, m.ID), Provider: p.ID, PName: p.Name, Icon: p.Icon})
+		}
+		s.SearchChoices = append(s.SearchChoices, j)
+	}
+	for _, p := range gateway.RelaysSaidToSearch() {
+		s.SearchRelays = append(s.SearchRelays, p.Name)
+	}
 }
 
 func settingsState() settingsJSON {
 	s := settingsJSON{Settings: settings.Load(), Version: Version, Dir: tilde(settings.Dir()), Portable: settings.Portable() != "", Gateway: gateway.URL()}
 	s.LANKey = "" // the retained credential belongs on disk, not in UI state
+	// the GitHub token, masked, and where the library's requests take one
+	// from: Settings, or the environment variable named
+	s.GitHubToken = ""
+	if tok, from := library.GitHubToken(); tok != "" {
+		s.GitHubTokenMask, s.GitHubTokenFrom = provider.Mask(tok), from
+	}
 	if found, err := discoverTerminals(); err == nil {
 		for _, app := range found.Apps {
 			s.TerminalApps = append(s.TerminalApps, terminalChoice{ID: app.ID, Name: app.Name})
@@ -635,6 +676,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		settings.CarryPerModel(&in, &cur)
 		in.LAN, in.LANKey = cur.LAN, cur.LANKey
 		in.LANKeyID = cur.LANKeyID
+		in.GitHubToken = cur.GitHubToken                 // set on its own (github-token below), never sent to the page
 		in.RequestArchive = cur.RequestArchive           // the Gateway page's, set on its own
 		in.RequestArchiveMaxMB = cur.RequestArchiveMaxMB // in settings.json only
 		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
@@ -657,6 +699,13 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		if v := strings.TrimSpace(in.ImageGen); v != "" && v != "off" && v != cur.ImageGen {
 			if _, _, ok := provider.Resolve(v); !ok {
 				fail(rw, fmt.Errorf("no model %s to generate images", v))
+				return
+			}
+		}
+		if v := strings.TrimSpace(in.Searcher); v != "" && v != cur.Searcher {
+			id, _, _ := strings.Cut(v, "/")
+			if !slices.ContainsFunc(gateway.Searchers(), func(c gateway.SearcherChoice) bool { return c.Provider.ID == id }) {
+				fail(rw, fmt.Errorf("%s can't search the web for other models", id))
 				return
 			}
 		}
@@ -849,6 +898,29 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		s := settings.Load()
 		s.RedactRules = in.Rules
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, settingsState())
+	})
+	// the GitHub token the library's requests to GitHub carry: set, or
+	// taken away with ""
+	mux.HandleFunc("POST /api/settings/github-token", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Token string `json:"token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		tok := strings.TrimSpace(in.Token)
+		if strings.ContainsFunc(tok, func(c rune) bool { return c <= ' ' || c == 0x7f }) {
+			fail(rw, fmt.Errorf("a GitHub token is one word, without spaces"))
+			return
+		}
+		s := settings.Load()
+		s.GitHubToken = tok
 		if err := settings.Save(s); err != nil {
 			fail(rw, err)
 			return

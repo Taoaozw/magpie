@@ -194,6 +194,16 @@ type drawn struct {
 
 func (s *Server) images(edit bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		inputBody, admitted := s.requestBody(w, r, provider.Chat)
+		if !admitted {
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(inputBody))
+		defer func() {
+			if r.MultipartForm != nil {
+				r.MultipartForm.RemoveAll()
+			}
+		}()
 		start := time.Now()
 		d, err := readDrawing(r)
 		if err != nil {
@@ -229,6 +239,9 @@ func (s *Server) images(edit bool) http.HandlerFunc {
 			fail(404, fmt.Sprintf("magpie knows no model %q to draw with", d.Model))
 			return
 		}
+		var unmask func()
+		w, d.Prompt, unmask = redactedPrompt(w, d.Prompt)
+		defer unmask()
 		call.Provider, call.To = p.ID, provider.Chat
 		ctx, cancel := context.WithTimeout(r.Context(), drawTimeout)
 		defer cancel()
@@ -320,7 +333,7 @@ func readDrawing(r *http.Request) (drawing, error) {
 			d.Mask = &pic
 		}
 	} else {
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return d, err
 		}

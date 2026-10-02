@@ -1012,10 +1012,14 @@ func claudeViaMagpie(fold bool) []Option {
 // or not, and compacts it, over and over, long before it runs out; a ref
 // written in bare (typed, or picked while the window wasn't known) was left
 // that way.
-func claude1M() func(ref string) string {
+func claude1M() func(ref string) string { return claude1MFor("claude") }
+
+// claude1MFor is claude1M for a Claude Code run by another agent, by the
+// models magpie shows that one (T3 Code's, t3code.go).
+func claude1MFor(agent string) func(ref string) string {
 	const mark = "[1m]"
 	window := map[string]int{}
-	for _, m := range magpieModels("claude") {
+	for _, m := range magpieModels(agent) {
 		window[m.ID] = m.Context
 	}
 	return func(ref string) string {
@@ -1096,6 +1100,12 @@ func claudeStandInAt(path, model, gw string) string {
 	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return v }
 	if env("ANTHROPIC_BASE_URL") != gw {
 		return ""
+	}
+	// the model Claude Code is set to itself, by that id, is its own pick
+	// rather than a tier's
+	bare := func(v string) string { m, _ := tierAt(v); return strings.TrimSuffix(m, "[1m]") }
+	if main := env("ANTHROPIC_MODEL"); main != "" && bare(main) == bare(model) {
+		return main
 	}
 	m := strings.ToLower(model)
 	for _, t := range claudeTiers {

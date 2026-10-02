@@ -104,6 +104,38 @@ func standIn(agent, asked string) string {
 	return m
 }
 
+// claudeFamily is a full id of one of the model families Claude Code has a
+// tier for, as Claude Code or a wrapper of it names one: claude-sonnet-4-6,
+// claude-fable-5-1, claude-haiku-4-5-20251001, claude-3-5-sonnet-20241022,
+// whatever the version, matched by family so a release magpie has never
+// heard of is one too. A provider's "a/claude-…" is not one.
+var claudeFamily = regexp.MustCompile(`^claude-(?:[0-9][0-9.-]*-)?(?:opus|sonnet|haiku|fable)(?:[-.@:]|$)`)
+
+// claudeTierStandIn is the model Claude Code is set to use for the tier of
+// a full Claude id it names (StandIn), even one magpie serves: Claude Code
+// asks for claude-haiku-… by name for its small tasks, and a wrapper (T3
+// Code, KevinXC on Discord) asks for every model by its full id, so
+// claude-sonnet-5 went to the Claude account magpie serves it on, spent,
+// while claude-sonnet-4-6, which no provider of the user's listed, went to
+// the sonnet tier. Every id of a family now goes to its tier, as Claude
+// Code's own aliases do. A routing group of the user's own named by the id
+// still has it; one magpie found (auto-…) was never picked for it. "" when
+// the id is no such one, the agent isn't Claude Code, or Claude Code isn't
+// routed through magpie (StandIn says nothing).
+func claudeTierStandIn(agent, asked string) string {
+	if StandIn == nil || agent != "claude" || !claudeFamily.MatchString(strings.ToLower(strings.TrimSuffix(asked, "[1m]"))) {
+		return ""
+	}
+	if gid, ok := provider.GroupFor(asked); ok && !strings.HasPrefix(gid, provider.GroupPrefix+"auto-") {
+		return ""
+	}
+	m := StandIn(agent, asked)
+	if m == asked {
+		return ""
+	}
+	return m
+}
+
 // unserved: magpie shows no entry for the model — not a catalog id or
 // model, nor the "provider/model" of a provider that is on (a routing
 // group's id is taken as served). A switched-off provider's is unserved: a
@@ -269,7 +301,10 @@ type Server struct {
 	sightOrder []string
 	// the requests out at each key or account with a MaxConcurrency, and
 	// those waiting their turn (concurrency.go)
-	lanes lanes
+	lanes         lanes
+	requestLimits requestLimits
+	// what a restart would cut short (busy.go)
+	busyCounters
 }
 
 // New makes a gateway.
@@ -408,6 +443,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/magpie/quotas", s.quotas)
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
 	mux.HandleFunc("GET /v1/magpie/concurrency", s.concurrency)
+	mux.HandleFunc("GET /v1/magpie/limit", s.keyLimit)
 	mux.HandleFunc("POST /v1/chat/completions", s.handle(provider.Chat))
 	mux.HandleFunc("POST /chat/completions", s.handle(provider.Chat))
 	mux.HandleFunc("POST /v1/responses", s.handle(provider.Responses))
@@ -433,7 +469,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos and /v1beta/models/*")
 	})
-	return callerGuard(withCaller(mux))
+	return s.counted(callerGuard(withCaller(keyLimited(mux))))
 }
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) {
@@ -580,6 +616,19 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get(provider.VideomakersHeader) != "" {
 		data = append(data, videomakerObjects()...)
 	}
+	// ?format=text: the ids one a line, to paste into a client that takes
+	// its models typed by hand, one a line, and asks no list of its own
+	// (ZCode's custom provider), from a browser on another computer with
+	// the gateway key as ?key=
+	if r.URL.Query().Get("format") == "text" {
+		var b strings.Builder
+		for _, m := range data {
+			fmt.Fprintln(&b, m["id"])
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, b.String())
+		return
+	}
 	out := map[string]any{"object": "list", "data": data, "has_more": false}
 	if len(data) > 0 {
 		out["first_id"], out["last_id"] = data[0]["id"], data[len(data)-1]["id"]
@@ -646,11 +695,11 @@ var estimatedMoved = []string{"cursor", "grok", "devin", "kiro", "qoder", "zed",
 // it implements counting, else a rough estimate. A failed connection or
 // limited key yields to the next key; other failures reach the client.
 func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, provider.Anthropic, 400, err.Error())
+	body, ok := s.requestBody(w, r, provider.Anthropic)
+	if !ok {
 		return
 	}
+	var err error
 	var model string
 	body, model, err = requestModel(body)
 	if err != nil {
@@ -660,6 +709,9 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	// Count the same masked prompt that generation sends to the vendor.
 	w, body, unmask := redacted(w, body)
 	defer unmask()
+	if m := claudeTierStandIn(agentOf(r), model); m != "" {
+		model = m // counted on the model the request will go to
+	}
 	model, _ = askedAt(model) // counted as the model, whatever its effort
 	id := unprefixed(model)
 	if sid, ok := provider.AutoStandIn(id); ok {
@@ -771,11 +823,11 @@ func unsupportedCount(status int, body []byte) bool {
 // handle is the request path of one client API.
 func (s *Server) handle(from provider.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeError(w, from, 400, err.Error())
+		body, ok := s.requestBody(w, r, from)
+		if !ok {
 			return
 		}
+		var err error
 		body, _, err = requestModel(body)
 		if err != nil {
 			writeError(w, from, 400, err.Error())
@@ -799,11 +851,11 @@ func (s *Server) gemini(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model, method := call[:i], call[i+1:]
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, provider.Gemini, 400, err.Error())
+	body, ok := s.requestBody(w, r, provider.Gemini)
+	if !ok {
 		return
 	}
+	var err error
 	if err := decodeRequest(body, &struct{}{}); err != nil {
 		writeError(w, provider.Gemini, 400, err.Error())
 		return
@@ -938,14 +990,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if agent == "claude-desktop" {
 		asked = desktopTurn(asked, body)
 	}
-	if id, ok := provider.GroupFor(asked); ok {
+	// a stand-in that is a tier at an effort of its own ("<model>:<level>",
+	// #536) is that model at that level, as were it asked for so
+	at := func(m string) string {
+		m, e := askedAt(m)
+		if askedEffort == "" {
+			askedEffort = e
+		}
+		return m
+	}
+	if m := claudeTierStandIn(agent, asked); m != "" {
+		// Claude Code (or a wrapper, T3 Code) naming one of Anthropic's
+		// models by its full id: the model it is set to use for that tier,
+		// whether or not magpie serves the id too
+		asked = at(m)
+	} else if id, ok := provider.GroupFor(asked); ok {
 		asked = id
 	} else if id, ok := provider.AutoStandIn(asked); ok {
 		// a group magpie found, while the user has those off: its model
 		// from one provider, rather than refused
 		asked = id
 	} else if m := standIn(agent, asked); m != "" {
-		asked = m
+		asked = at(m)
 	}
 	p, model, ok := provider.Resolve(asked)
 	if !ok {
@@ -1270,7 +1336,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		s.trace.update(tr, func(t *Route) {
 			t.Tries = append(t.Tries, Try{ID: c.rest, Model: c.model, Effort: sent, Picked: picked, Fixed: fixed, Fast: fast, Start: began})
 		})
-		held := false // answered as its vendor did a moment ago, without asking
+		held := false    // answered as its vendor did a moment ago, without asking
 		var queued int64 // ms it waited for a slot of its key's or account's
 		if said, ok := verifyHeld(c.restKey()); ok && last {
 			// the account must be verified first (#152): the agent's
@@ -2127,6 +2193,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if spaces != nil {
 		w.Write(spaces.flush())
 	}
+	if sse {
+		sniff.drain()
+	}
 	if sse && r.Context().Err() == nil && !sniff.whole() {
 		// the upstream died mid-reply, or ended it short of its last
 		// event: say so in the stream rather than end it as if whole,
@@ -2149,7 +2218,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			return res.StatusCode, failed, true
 		}
 	}
-	return res.StatusCode, "", true
+	return res.StatusCode, sniff.failed, true
 }
 
 // cutMidReply is what a stream whose read failed mid-reply is ended with:
@@ -3341,6 +3410,8 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 		typ = "permission_error"
 	case status == 404:
 		typ = "not_found_error"
+	case status == 413 && proto == provider.Anthropic:
+		typ = "request_too_large"
 	case status == 429:
 		typ = "rate_limit_error"
 	case status == 529:
@@ -3360,7 +3431,7 @@ func writeError(w http.ResponseWriter, proto provider.Protocol, status int, msg 
 	case provider.Anthropic:
 		v = map[string]any{"type": "error", "error": map[string]any{"type": typ, "message": msg}}
 	case provider.Gemini:
-		st := map[int]string{400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
+		st := map[int]string{400: "INVALID_ARGUMENT", 408: "DEADLINE_EXCEEDED", 413: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED", 404: "NOT_FOUND",
 			429: "RESOURCE_EXHAUSTED", 500: "INTERNAL", 502: "UNAVAILABLE", 503: "UNAVAILABLE", 529: "UNAVAILABLE"}[status]
 		if st == "" {
 			st = "UNKNOWN"

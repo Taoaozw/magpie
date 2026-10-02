@@ -168,6 +168,33 @@ func (p Provider) Fetch(ctx context.Context) ([]catalog.Model, error) {
 	return catalog.Chat(ms), catalog.SaveLive(p.ID, base, ms)
 }
 
+// List asks the vendor which models it serves, as Fetch does, and keeps
+// nothing: a provider still being added (#578, the add form's Fetch models)
+// is shown its vendor's list to pick from before it is saved.
+func (p Provider) List(ctx context.Context) ([]catalog.Model, error) {
+	ctx = p.Via(ctx)
+	if pr := Preset(p.Preset); pr != nil && pr.NoList && strings.TrimSpace(p.ModelsURL) == "" && !p.listRegion(pr) {
+		return catalog.Chat(p.planModels(nil)), nil
+	}
+	if p.IsCline() && strings.TrimSpace(p.ModelsURL) == "" {
+		if ms, _, err := p.clineFeed(ctx); err == nil {
+			return catalog.Chat(ms), nil
+		}
+	}
+	if p.IsKilo() && strings.TrimSpace(p.ModelsURL) == "" {
+		ms, _, err := p.kiloModels(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return catalog.Chat(ms), nil
+	}
+	ms, _, err := p.fetchOne(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return catalog.Chat(ms), nil
+}
+
 // newFetches is when each account with no list from its vendor yet was
 // last asked for one by FetchNew.
 var newFetches = struct {
@@ -536,6 +563,10 @@ func (p Provider) Exposed() []catalog.Model {
 		// not in a Student plan's) or that it was refused is left out;
 		// with none left, as if none were picked.
 		picks = slices.DeleteFunc(slices.Clone(picks), func(id string) bool { _, ok := byID[id]; return !ok })
+	} else if p.Account != nil && p.Account.unusable != nil {
+		// with no list fetched, a pick the account can't be served (a
+		// ZCode Start Plan account's GLM-5.3) is left out all the same
+		picks = slices.DeleteFunc(slices.Clone(picks), p.Account.unusable)
 	}
 	if len(picks) > 0 {
 		return pick(picks)
@@ -823,6 +854,10 @@ type Entry struct {
 	Family string `json:"family,omitempty"`
 	// Free is set on a model its subscription serves at no cost to it.
 	Free bool `json:"free,omitempty"`
+	// Rate and RateWas are the credits a request costs its subscription,
+	// as a multiple, and before a discount running now (catalog.Model's).
+	Rate    float64 `json:"rate,omitempty"`
+	RateWas float64 `json:"rateWas,omitempty"`
 	// Shared are a group's levels its members have in common: its Efforts,
 	// unless the group names its own (Group.Levels).
 	Shared []string `json:"-"`
@@ -911,7 +946,7 @@ func entryFor(p Provider, m catalog.Model, s settings.Settings) Entry {
 	}
 	images, imageInput := ApplyImage(p.ID, m.ID, images, m.ImageInput)
 	e := Entry{ID: p.ID + "/" + m.ID, Model: m.ID, Family: p.Family, Name: m.Name, Efforts: effortsOf(m), Provider: p,
-		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free}
+		Images: images, ImageInput: imageInput, Context: ctx, Output: output, Free: m.Free, Rate: m.Rate, RateWas: m.RateWas}
 	if n, ok := modelNameIn(s.ModelNames, p.ID, m.ID); ok {
 		e.Name, e.Default = n, m.Name
 	}

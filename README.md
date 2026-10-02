@@ -99,6 +99,7 @@ and there is a terminal version (`magpie tui`) and a plain CLI.
 | Grok Build   | `~/.grok/config.toml` (`$GROK_HOME`) | model, effort |
 | ZCode        | `~/.zcode/v2/config.json`         | provider (magpie's models in ZCode's picker) |
 | WorkBuddy    | `~/.workbuddy/models.json` (`$WORKBUDDY_CONFIG_DIR`) | provider (magpie's models in WorkBuddy's picker) |
+| T3 Code      | `~/.t3/userdata/settings.json` (`$T3CODE_HOME/userdata`) | provider (a `magpie` provider instance on Claude Code, magpie's models as its custom models) |
 | OpenHanako   | `~/.hanako/provider-catalog.json` + `agents/<id>/config.yaml` (`$HANA_HOME`; its local API while it runs) | model (the primary agent's; magpie's models as a provider) |
 | Alma         | Alma's local API (`localhost:23001`, while Alma runs) | model (Alma's default; magpie's models as a provider) |
 
@@ -186,7 +187,29 @@ magpie gateway-key add "Remote laptop" # prints the new credential once
 magpie gateway-key list                # ids, names, enabled state and masked keys
 magpie gateway-key rotate <id>         # prints the replacement; identity stays the same
 magpie gateway-key remove <id>         # revokes remote access
+magpie gateway-key limit <id> week --tokens 2m --cost 5   # its own limit
+magpie gateway-key limit <id>          # limit, used, left and reset
+magpie gateway-key limit <id> off      # no limit
 ```
+
+Each gateway key can have its own **limit**: a token total, an estimated
+cost in US$, or both, per day, week or month (calendar windows in local
+time: from midnight, from Monday, from the 1st). Set it with **Limit** on
+the key's row (saved with Save) or `magpie gateway-key limit`; the row shows
+what the key has used, what is left and when it resets. Tokens counted are a
+call's uncached input, output and cache writes, plus cache reads when **Count
+cache reads too** is on. Cost is an estimate at the Usage page's prices; a
+call with no known price adds none. A call counts in the window it started
+in. Once a key is spent, its requests are refused before any provider is
+asked, with a 429 in the API's own error shape that names the key, the
+limit and the reset time, plus `Retry-After`; other keys are unaffected. The
+counts are read from the usage log, so they survive a restart. A request in
+flight holds a reservation (its body's size in tokens plus the key's mean
+output per call), so requests sent at once overshoot by about one call; a
+streamed reply is settled when it ends with the usage its vendor reported.
+A key can read its own status with `GET /v1/magpie/limit`. Requests from
+this computer that send no gateway key are not limited; a gateway key used
+from this computer is.
 
 While LAN sharing is enabled, remote requests require an enabled gateway key
 sent as Bearer, `x-api-key`, `x-goog-api-key` or `?key=`. Loopback remains
@@ -587,6 +610,12 @@ holds the answer until the route changes past the `seq` of the last one,
 so a UI can follow a turn with one request at a time. Only the session
 named is told; like `/v1/magpie/quotas`, it answers this machine, and
 another only with the key of a gateway shared on the local network.
+
+To show the one in use without a session, `GET /v1/magpie/quotas` (and
+`magpie quota --json`, the same list) has `lastServedAt` on each
+subscription account, plan and key that answered a request through the
+gateway in the last 30 days, and `last: true` on the latest. It is kept
+in `served.json` beside `providers.json`, so a restart keeps it.
 
 The *Gateway* tab in the app has this as copy buttons and ready-made
 snippets (shell, curl, Python, Node) for each API, the list of model ids,

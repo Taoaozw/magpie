@@ -8,10 +8,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/budget"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -182,7 +184,7 @@ func lanGuard(next http.Handler) http.Handler {
 			http.Error(w, "magpie isn't shared on the local network", http.StatusForbidden)
 			return
 		}
-		if (remote && shared) || (!remote && access.Managed(callerKey(r))) {
+		if (remote && shared) || (!remote && managedKey(r)) {
 			var ok bool
 			r, ok = identifyCaller(w, r)
 			if !ok {
@@ -199,7 +201,7 @@ func lanGuard(next http.Handler) http.Handler {
 // callerGuard also covers embedded handlers used by the web app and tests.
 func callerGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if access.Caller(r.Context()).KeyID == "" && access.Managed(callerKey(r)) && (local(r) || settings.Load().LAN) {
+		if access.Caller(r.Context()).KeyID == "" && managedKey(r) && (local(r) || settings.Load().LAN) {
 			var ok bool
 			r, ok = identifyCaller(w, r)
 			if !ok {
@@ -211,10 +213,15 @@ func callerGuard(next http.Handler) http.Handler {
 }
 
 func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
-	key := callerKey(r)
-	who, ok := access.Authenticate(key)
+	var who access.Identity
+	ok := false
+	for _, k := range callerKeys(r) {
+		if who, ok = access.Authenticate(k); ok {
+			break
+		}
+	}
 	if !ok && !local(r) {
-		msg := refusedKey(key)
+		msg := refusedKey(callerKey(r))
 		log.Printf("refused %s %s from %s: %s", r.Method, r.URL.Path, r.RemoteAddr, msg)
 		writeError(w, provider.Chat, http.StatusUnauthorized, msg)
 		return r, false
@@ -251,7 +258,7 @@ func accountOf(p provider.Provider) string {
 func appendUsage(r *http.Request, rec usage.Record) {
 	who := access.Caller(r.Context())
 	rec.CallerKeyID, rec.CallerKeyName = who.KeyID, who.KeyName
-	usage.Append(rec)
+	budget.Append(rec)
 }
 
 // lanKeyed marks a request from another machine that carried the key.
@@ -264,17 +271,50 @@ func sharedWith(r *http.Request) bool {
 	return ok
 }
 
-// callerKey is the API key a request carries, however its client sends one.
+// callerKey is the API key a request carries, however its client sends one:
+// the first of callerKeys, "" for none.
 func callerKey(r *http.Request) string {
-	if a := r.Header.Get("Authorization"); a != "" {
-		return strings.TrimSpace(strings.TrimPrefix(a, "Bearer "))
+	if ks := callerKeys(r); len(ks) > 0 {
+		return ks[0]
 	}
-	for _, h := range []string{"x-api-key", "x-goog-api-key"} {
-		if v := r.Header.Get(h); v != "" {
-			return v
+	return ""
+}
+
+// callerKeys are the API keys a request carries, in the order they are
+// read: Authorization's bearer token, x-api-key, x-goog-api-key, ?key=. A
+// header that carries none ("Authorization: Bearer ", sent beside an
+// x-api-key by a client with no token set) is passed over, and a client
+// that sends two different values — a stale or placeholder token in
+// Authorization (ANTHROPIC_AUTH_TOKEN left at magpie), the key in x-api-key
+// — is let in by whichever is an enabled gateway key. Loopback takes any
+// token, so this mattered only from another computer, which was refused
+// what this one was answered (悠悠哥 on Discord: a client's model list from
+// magpie shared on a NAS failed, from magpie on 127.0.0.1 it came).
+func callerKeys(r *http.Request) []string {
+	var out []string
+	add := func(v string) {
+		if v = strings.TrimSpace(v); v != "" && !slices.Contains(out, v) {
+			out = append(out, v)
 		}
 	}
-	return r.URL.Query().Get("key")
+	a := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(a) >= 7 && strings.EqualFold(a[:7], "Bearer ") {
+		a = a[7:]
+	} else if strings.EqualFold(a, "Bearer") {
+		a = ""
+	}
+	add(a)
+	for _, h := range []string{"x-api-key", "x-goog-api-key"} {
+		add(r.Header.Get(h))
+	}
+	add(r.URL.Query().Get("key"))
+	return out
+}
+
+// managedKey: the request carries a named gateway key's form (sk-magpie-…)
+// in any of the places a key is read.
+func managedKey(r *http.Request) bool {
+	return slices.ContainsFunc(callerKeys(r), access.Managed)
 }
 
 // refusedKey says why a caller's key was turned away: none came, or the

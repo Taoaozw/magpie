@@ -95,6 +95,11 @@ type Provider struct {
 	// in to another when that one runs low or out (#524). The gateway still
 	// spreads its requests over the accounts that are on, as Routing says.
 	KeepLogin bool `json:"keepLogin,omitempty"`
+	// KeepLoginAs, with KeepLogin, is the account the agent is kept signed
+	// in to whichever is first in the order the gateway tries them: the one
+	// the user uses the agent as, while the first is only the one whose
+	// allowance is spent first (#524). Empty, it is the first.
+	KeepLoginAs string `json:"keepLoginAs,omitempty"`
 
 	// MaxConcurrency is how many requests may be out at the vendor at once
 	// on each of its keys or accounts (Discord, Lemon: a Codex account is
@@ -307,7 +312,7 @@ func All() []Provider {
 			continue
 		}
 		pk := picks[a.ID]
-		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.Contexts, pk.Family
+		a.Models, a.Unlisted, a.Off, a.Fallback, a.Routing, a.Affinity, a.KeepLogin, a.KeepLoginAs, a.Contexts, a.Family = pk.Models, pk.Unlisted, pk.Off, pk.Fallback, pk.Routing, pk.Affinity, pk.KeepLogin, pk.KeepLoginAs, pk.Contexts, pk.Family
 		a.Proxy, a.AccountProxies, a.AccountModels = pk.Proxy, pk.AccountProxies, pk.AccountModels
 		a.MaxConcurrency = pk.MaxConcurrency
 		if a.ID == "cursor" { // picked before its efforts were one model
@@ -408,7 +413,7 @@ func Save(p Provider) error {
 		if p.ID == "kiro" {
 			key = p.Key
 		}
-		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, MaxConcurrency: p.MaxConcurrency, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID)}
+		p = Provider{ID: p.ID, Key: key, Models: p.Models, Unlisted: p.Unlisted, Off: p.Off, Fallback: p.Fallback, Routing: p.Routing, Affinity: p.Affinity, KeepLogin: p.KeepLogin, KeepLoginAs: p.KeepLoginAs, Contexts: p.Contexts, Family: p.Family, Proxy: p.Proxy, AccountProxies: p.AccountProxies, AccountModels: p.AccountModels, MaxConcurrency: p.MaxConcurrency, Hidden: hiddenAccount(p.ID), Quiet: quietAccount(p.ID)}
 	} else {
 		p.AccountProxies = nil // a provider of a key has no accounts to proxy apart
 		if subscriptionID(p.ID) && !stored(p.ID) {
@@ -694,6 +699,12 @@ func normalize(p Provider) Provider {
 	if p.Preset == "qianfan-token-plan" {
 		p.Preset = "baidu-qianfan"
 	}
+	// OpenCode Zen serves its free models (-free) signed out, to the key
+	// OpenCode itself sends then: a Zen provider saved with no key of its
+	// own asks with that one
+	if p.Preset == "opencode-zen" && p.Key == "" {
+		p.Key = OpenCodeAnonymousKey
+	}
 	if p.Routing != Ordered && p.Routing != Rotate && p.Routing != LeastUsed && p.Routing != Pace {
 		p.Routing = ""
 	}
@@ -829,6 +840,12 @@ func (p Provider) ResponsesFirst(model string) bool {
 	if p.Responses == "" || (p.ID != "copilot" && HostOf(p.Responses) != "api.openai.com" && HostOf(p.Responses) != "api.pipellm.ai" && !p.IsAzure()) {
 		return false
 	}
+	return openAIModel(model)
+}
+
+// openAIModel is whether model is one of OpenAI's own by its name: a GPT,
+// a Codex or an o-series model, after any vendor prefix.
+func openAIModel(model string) bool {
 	m := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
 	return strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "codex") ||
 		len(m) > 1 && m[0] == 'o' && m[1] >= '0' && m[1] <= '9'
